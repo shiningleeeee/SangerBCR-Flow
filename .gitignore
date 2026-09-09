@@ -1,0 +1,19 @@
+# Sanger sequencing input
+raw_data/
+*.ab1
+
+# Pipeline outputs and downloaded resources (created by the scripts / walkthrough)
+results/
+references/
+igblast_tool/
+
+# Python
+__pycache__/
+*.pyc
+
+# Miniconda installer used in the walkthrough
+Miniconda3-latest-Linux-x86_64.sh
+
+# OS
+.DS_Store
+Thumbs.db

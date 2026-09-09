@@ -1,0 +1,7 @@
+# Python dependencies for SangerBCR-Flow
+# Biopython >= 1.71 is required for the "abi-trim" SeqIO format used by 01_ab1_to_fasta.py
+biopython>=1.71
+numpy
+pandas
+seaborn
+matplotlib
