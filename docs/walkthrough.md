@@ -1,99 +1,123 @@
-# 使用教程（WSL / Linux 环境）
+# Walkthrough (WSL / Linux)
 
-> 本教程由仓库最初的单文件 `code` 整理而来。脚本已拆分为本仓库 `scripts/` 下的三个独立文件（代码内容**未做任何修改**），安装与运行步骤保持原样。
->
-> 运行前提：三个脚本放在 `~/bcr/scripts`（脚本用相对路径 `../raw_data`、`../results` 访问同级文件夹），因此目录结构为：
->
-> ```
-> bcr/
-> ├── igblast_tool/   # 02 自动下载的 IgBLAST（含参考库）
-> ├── raw_data/       # 放入 .ab1 原始测序文件
-> ├── references/     # 02 自动准备的 IMGT 参考基因
-> ├── results/        # 01/02/03 的输出
-> └── scripts/        # 本仓库 scripts/ 下的三个脚本
-> ```
+Step-by-step setup for SangerBCR-Flow on Windows with WSL, or on any Linux machine.
+If you already have a Linux shell with Python 3.9 or newer, jump to
+[section 4](#4-get-the-scripts).
 
-## 1. WSL 的安装及关闭
+The pipeline itself is three commands; sections 1-3 are one-time setup.
 
-```bash
-#安装wsl至D盘wsl文件夹
+## 1. Install WSL (Windows only)
+
+```powershell
+# Install Ubuntu into D:\wsl
 wsl --install --web-download --location D:\wsl
-#查看所有发行版详细信息,简写wsl -l -v
+# List distributions with their state
 wsl --list --verbose
-#关闭特定发行版
+# Stop one distribution
 wsl --terminate Ubuntu
-#关闭所有
+# Stop everything
 wsl --shutdown
 ```
 
-## 2. 文件夹的建立及包的安装
+Then open Ubuntu from the Start menu and continue in the shell it opens.
+
+## 2. System packages
 
 ```bash
-# 进入 Ubuntu/WSL 后，先更新系统软件源并安装 IgBLAST 可能需要的系统运行库
 sudo apt update
-sudo apt install -y libgomp1
-#创建文件夹
-mkdir bcr
-cd bcr
-mkdir igblast_tool raw_data references results scripts
-#将原始的测序文件ab1放入raw_data文件夹下
-#安装miniconda3
+sudo apt install -y libgomp1 perl
+```
+
+`libgomp1` is a runtime library IgBLAST needs. `perl` runs IgBLAST's
+`edit_imgt_file.pl` on the first run of step 2 (Ubuntu normally ships it; installing it
+again is harmless).
+
+## 3. Python environment
+
+```bash
 cd ~
 wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
 bash Miniconda3-latest-Linux-x86_64.sh
-#装完后执行
-source ~/.bashrc
-#成功后运行下面代码，看到版本说明安装成功
-conda --version
-#创建分析环境
+source ~/.bashrc          # reload the shell so that conda is on PATH
+conda --version           # prints a version once the installation worked
+
 conda create -n bcr python=3.9
-#创建完成后激活
 conda activate bcr
-#安装必要的Python包
-cd ~/bcr
-pip install biopython pandas seaborn matplotlib numpy
-#（等价方式：仓库附带的 requirements.txt，与上面命令行效果一致）
-# pip install -r requirements.txt
 ```
 
-> 说明：02 脚本会用 Perl 运行 IgBLAST 自带的 `edit_imgt_file.pl`，Ubuntu 默认自带 perl；若提示缺少 perl，先 `sudo apt install -y perl`。
-
-## 3. 脚本的准备
-
-把仓库 `scripts/` 下的三个文件放进 `~/bcr/scripts`：
+## 4. Get the scripts
 
 ```bash
-# 方式一（推荐）：把仓库克隆/下载到 ~/bcr 下，scripts/ 即仓库中的 scripts/
+mkdir -p ~/bcr
 cd ~/bcr
 git clone https://github.com/shiningleeeee/SangerBCR-Flow.git .
-
-# 方式二：手动复制
-# 将仓库中的 scripts/01_ab1_to_fasta.py、scripts/02_run_igblast.sh、
-# scripts/03_analyze_clones.py 复制到 ~/bcr/scripts/
+mkdir -p raw_data references results      # igblast_tool/ is created by step 2
+pip install -r requirements.txt
 ```
 
-三个脚本的作用与数据流：
+The scripts are run from `scripts/` and reach their neighbours through relative paths
+(`../raw_data`, `../results`), so this layout matters:
 
-| 脚本 | 作用 | 主要输出（均在 `results/`） |
-| --- | --- | --- |
-| `01_ab1_to_fasta.py` | 读取 `raw_data/*.ab1`，按质量修剪（abi-trim），过滤过短序列 | `01_cleaned_sequences.fasta`、`01_raw_sequences.fasta`、`01_sequence_summary.tsv` |
-| `02_run_igblast.sh` | 首次运行自动下载 IgBLAST 1.22.0 与 IMGT 人源 V/D/J（+C 区）参考并建库，随后对清洗后序列做 V(D)J 注释 | `02_igblast_results.tsv`（IgBLAST AIRR TSV，outfmt 19） |
-| `03_analyze_clones.py` | 过滤 productive 序列；基因使用 / SHM / CDR3 长度分布图；heavy-only 克隆分型（同 V、同 J、同 junction 长度 + junction nt 相似度）与克隆饼图 | `analysis_output/` 下的 PNG 图与 `Heavy_Clonotypes.tsv`、`Clone_Summary.tsv` |
+```
+~/bcr/
+├── raw_data/       your .ab1 files
+├── scripts/        01_ab1_to_fasta.py, 02_run_igblast.sh, 03_analyze_clones.py
+├── results/        output, created by the scripts
+├── references/     germline references, created by step 2
+└── igblast_tool/   IgBLAST, created by step 2
+```
 
-## 4. 执行脚本
+## 5. Put your data in place
+
+Copy your Sanger `.ab1` files into `raw_data/`. The file name becomes the record ID, so
+name each file after the well, and after the chain if you sequence heavy and light
+chains separately, for example `A1_VH.ab1` and `A1_VL.ab1`.
+
+## 6. Run the pipeline
 
 ```bash
+conda activate bcr
 cd ~/bcr/scripts
-python3 01_ab1_to_fasta.py
-bash 02_run_igblast.sh
-python3 03_analyze_clones.py
+python3 01_ab1_to_fasta.py     # .ab1  -> quality-trimmed FASTA
+bash 02_run_igblast.sh         # FASTA -> IgBLAST annotation (downloads IgBLAST once)
+python3 03_analyze_clones.py   # TSV   -> plots and clonotype tables
 ```
 
-## 5. 注意事项
+| Step | Output |
+| --- | --- |
+| 1 | `results/01_cleaned_sequences.fasta`, `results/01_raw_sequences.fasta`, `results/01_sequence_summary.tsv` |
+| 2 | `results/02_igblast_results.tsv` |
+| 3 | `results/analysis_output/` with four PNG figures, `Heavy_Clonotypes.tsv` and `Clone_Summary.tsv` |
+
+The first run of step 2 takes a few minutes: it downloads IgBLAST and the germline
+references. Later runs reuse `igblast_tool/` and `references/` and go straight to the
+search.
+
+## 7. Between runs
+
+Rename or move `results/` before starting a new experiment, so that two experiments do
+not end up in the same folder:
 
 ```bash
-#results文件夹下的结果请及时转移，避免新运行产生的结果混淆
-#后续只需把原始测序文件放入raw_data文件夹下，先source ~/.bashrc , conda activate bcr并且cd ~/bcr/scripts依次执行三个脚本即可
+mv ~/bcr/results ~/bcr/results_2026-01-31
 ```
 
-- 可调参数（如 `MIN_LEN`、`MAX_DISTANCE`、`TOP_N_CLONES_IN_PIE` 等）在 `03_analyze_clones.py` 顶部「路径和参数」区域修改（此版重组未改动任何代码）。
+The next run of step 1 recreates `results/` on its own.
+
+## 8. Notes
+
+- Parameters such as `MIN_LEN`, `MAX_DISTANCE` and `TOP_N_CLONES_IN_PIE` are set at the
+  top of the corresponding script.
+- Step 2 is human-specific: `-organism human` and the human IMGT references are fixed.
+- Clonotyping uses the heavy chain only; light chains are annotated and plotted.
+
+## 9. Common problems
+
+| Symptom | What to do |
+| --- | --- |
+| `no .ab1 files found in raw_data/` | run step 1 from `scripts/`, and make sure the files are directly in `raw_data/`, not in a subfolder |
+| error mentioning `abi-trim` | the environment has Biopython < 1.71: `pip install -U "biopython>=1.71"` |
+| step 2 fails while downloading | check the network, delete the incomplete file under `igblast_tool/` or `references/`, then run step 2 again |
+| `ERROR: auxiliary data file missing` | the IgBLAST download did not complete: delete `igblast_tool/` and run step 2 again |
+| `conda: command not found` | run `source ~/.bashrc` first |
+| figures are empty or nearly empty | check `results/01_sequence_summary.tsv`: reads may have been dropped as too short, or no record may have been called productive |

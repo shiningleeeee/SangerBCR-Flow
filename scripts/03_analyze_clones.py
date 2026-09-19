@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+"""Step 3 of SangerBCR-Flow: summary plots and heavy-chain clonotype calling.
+
+Input : ../results/02_igblast_results.tsv   AIRR rearrangement TSV from step 2
+Output: ../results/analysis_output/
+          Heavy_V_Usage.png, Light_V_Usage.png
+          SHM_Distribution.png
+          CDR3_Length_Distribution.png
+          Clone_Pie_Chart.png
+          Heavy_Clonotypes.tsv, Clone_Summary.tsv
+
+Clonotypes are called on the heavy chain only: records sharing the V gene, the J gene
+and the junction length are linked when their junction nucleotide sequences differ by at
+most MAX_DISTANCE (normalised Hamming distance), and linked records are merged
+transitively (single linkage).
+
+Run from this directory:  python3 03_analyze_clones.py
+"""
 
 
 import os
@@ -10,38 +26,42 @@ import matplotlib.pyplot as plt
 
 
 # =========================
-# 1. 路径和参数：只改这里
+# 1. Paths and parameters
 # =========================
 INPUT_FILE = "../results/02_igblast_results.tsv"
 OUTPUT_DIR = "../results/analysis_output"
 
-# junction nt 最大归一化 Hamming 距离
+# Maximum normalised Hamming distance between junction nucleotide sequences
 MAX_DISTANCE = 0.15
 
-# 是否按 sequence_id 去重
+# Drop records that share a sequence_id before clonotyping
 DROP_DUPLICATE_SEQUENCE_ID = False
 
-# 饼图显示前几个 clone
+# Clones drawn individually in the pie chart; smaller clones are pooled into "Others"
 TOP_N_CLONES_IN_PIE = 19
 
 
 # =========================
-# 2. 基础定义
+# 2. Shared constants
 # =========================
+# Values that count as true in the AIRR TSV (IgBLAST writes T / F)
 TRUTHY = {"T", "TRUE", "1", "YES", "Y"}
+# Strings that stand for "no value" in the AIRR TSV
 FAKE_NULL = {"", "NA", "NAN", "NONE", "NULL"}
 
 
 # =========================
-# 3. 基础函数
+# 3. Helper functions
 # =========================
 def is_truthy(x):
+    """Return True when an AIRR boolean field (T / F, True / False, 1 / 0) is true."""
     if pd.isna(x):
         return False
     return str(x).strip().upper() in TRUTHY
 
 
 def get_chain_type(v_call):
+    """Return Heavy, Light or Unknown from a V gene call."""
     if pd.isna(v_call):
         return "Unknown"
     s = str(v_call).upper()
@@ -53,23 +73,19 @@ def get_chain_type(v_call):
 
 
 def is_heavy_chain(v_call):
+    """Return True when the V gene call belongs to a heavy chain."""
     return get_chain_type(v_call) == "Heavy"
 
 
 def first_call(x):
-    """
-    v_call/j_call 有时可能有多个候选，用逗号分隔。
-    默认取第一个。
-    """
+    """Take the first of the possibly comma-separated gene calls reported by IgBLAST."""
     if pd.isna(x):
         return ""
     return str(x).split(",")[0].strip()
 
 
 def strip_allele(x):
-    """
-    IGHV3-23*01 -> IGHV3-23
-    """
+    """Drop the allele suffix of a gene call: IGHV3-23*01 becomes IGHV3-23."""
     x = first_call(x)
     if not x:
         return ""
@@ -77,9 +93,9 @@ def strip_allele(x):
 
 
 def normalize_cdr3_aa(x):
-    """
-    用于画 CDR3 length 分布图
-    避免 NaN 变成 'nan'
+    """Return an uppercase CDR3 amino acid string, or None when the value is unusable.
+
+    Keeps empty fields, so that a missing CDR3 never enters the length plot as "nan".
     """
     if pd.isna(x):
         return None
@@ -92,12 +108,9 @@ def normalize_cdr3_aa(x):
 
 
 def normalize_junction_nt(x):
-    """
-    用于 clonotyping 的 junction nt
-    - 缺失值返回 None
-    - 避免 NaN 被转成 'nan'
-    - 转大写
-    - 只允许纯字母序列
+    """Return the junction nucleotide sequence in upper case, or None when unusable.
+
+    Keeps empty fields, so that a missing junction never enters clonotyping as "nan".
     """
     if pd.isna(x):
         return None
@@ -114,8 +127,9 @@ def normalize_junction_nt(x):
 
 
 def normalized_hamming_distance(seq1, seq2):
-    """
-    同长度序列的归一化 Hamming 距离
+    """Return the normalised Hamming distance (mismatches / length) of two sequences.
+
+    Both sequences must have the same length.
     """
     if len(seq1) != len(seq2):
         raise ValueError("Hamming distance requires equal-length sequences.")
@@ -130,6 +144,8 @@ def normalized_hamming_distance(seq1, seq2):
 # 4. Union-Find
 # =========================
 class UnionFind:
+    """Disjoint-set structure used to merge junction sequences that are linked."""
+
     def __init__(self, items):
         self.parent = {x: x for x in items}
 
@@ -147,12 +163,13 @@ class UnionFind:
 
 
 # =========================
-# 5. 画图函数
+# 5. Plot functions
 # =========================
 def plot_gene_usage(df, output_dir):
-    print("\n--- Generating Gene Usage Plots ---")
+    """Write the heavy and light chain V gene usage bar charts."""
+    print("\nGene usage plots ...")
 
-    # Heavy V gene
+    # Heavy chain V genes
     heavy_df = df[df["chain_type"] == "Heavy"].copy()
     heavy_v = heavy_df["v_gene"].dropna().value_counts().head(20)
 
@@ -179,7 +196,7 @@ def plot_gene_usage(df, output_dir):
         plt.savefig(os.path.join(output_dir, "Heavy_V_Usage.png"), dpi=300)
         plt.close()
 
-    # Light V gene
+    # Light chain V genes
     light_df = df[df["chain_type"] == "Light"].copy()
     light_v = light_df["v_gene"].dropna().value_counts().head(20)
 
@@ -208,17 +225,18 @@ def plot_gene_usage(df, output_dir):
 
 
 def plot_shm(df, output_dir):
-    print("\n--- Generating SHM Analysis ---")
+    """Write the somatic hypermutation histogram for both chain types."""
+    print("\nSHM analysis ...")
 
     plot_df = df.copy()
     plot_df["v_identity_num"] = pd.to_numeric(plot_df["v_identity"], errors="coerce")
     plot_df = plot_df.dropna(subset=["v_identity_num"]).copy()
 
     if plot_df.empty:
-        print("No valid v_identity found. Skip SHM plot.")
+        print("No usable v_identity values; skipping the SHM plot.")
         return
 
-    # 默认按百分比处理：mutation_rate = 100 - v_identity
+    # IgBLAST reports v_identity as a percentage (0-100), not as a fraction
     plot_df["mutation_rate"] = 100 - plot_df["v_identity_num"]
 
     plt.figure(figsize=(8, 6))
@@ -231,19 +249,20 @@ def plot_shm(df, output_dir):
 
 
 def plot_cdr3_length(df, output_dir):
-    print("\n--- Generating CDR3 Length Distribution ---")
+    """Write the CDR3 amino acid length distribution."""
+    print("\nCDR3 length distribution ...")
 
     plot_df = df.copy()
     plot_df["cdr3_aa_clean"] = plot_df["cdr3_aa"].apply(normalize_cdr3_aa) if "cdr3_aa" in plot_df.columns else None
 
     if "cdr3_aa_clean" not in plot_df.columns:
-        print("No cdr3_aa column found. Skip CDR3 length plot.")
+        print("No cdr3_aa column found; skipping the CDR3 length plot.")
         return
 
     plot_df = plot_df.dropna(subset=["cdr3_aa_clean"]).copy()
 
     if plot_df.empty:
-        print("No valid cdr3_aa found. Skip CDR3 length plot.")
+        print("No usable cdr3_aa values; skipping the CDR3 length plot.")
         return
 
     plot_df["cdr3_length"] = plot_df["cdr3_aa_clean"].str.len()
@@ -258,10 +277,11 @@ def plot_cdr3_length(df, output_dir):
 
 
 def plot_clone_donut(clone_counts, total_cells, output_dir, top_n=19):
-    print("\n--- Generating Clone Pie Chart ---")
+    """Write the clone size pie chart, showing the top_n largest clones."""
+    print("\nClone pie chart ...")
 
     if clone_counts.empty:
-        print("No clone counts available. Skip clone pie chart.")
+        print("No clone counts available; skipping the pie chart.")
         return
 
     top_clones = clone_counts.head(top_n)
@@ -310,9 +330,10 @@ def plot_clone_donut(clone_counts, total_cells, output_dir, top_n=19):
 
 
 # =========================
-# 6. 数据读取与清洗
+# 6. Input loading and filtering
 # =========================
 def load_raw_data(input_file):
+    """Read the AIRR TSV and keep the productive records."""
     print(f"Loading data from: {input_file}")
     df = pd.read_csv(input_file, sep="\t", dtype=str)
 
@@ -320,18 +341,18 @@ def load_raw_data(input_file):
     missing_cols = [c for c in required_cols if c not in df.columns]
     if missing_cols:
         raise ValueError(
-            f"输入文件缺少必要列: {missing_cols}\n"
-            f"至少需要: {required_cols}"
+            f"Input file is missing required column(s): {missing_cols}\n"
+            f"Required at least: {required_cols}"
         )
 
-    # productive
+    # Productive records only
     df["productive_bool"] = df["productive"].apply(is_truthy)
     df = df[df["productive_bool"]].copy()
 
-    # chain type
+    # Chain type from the V gene call
     df["chain_type"] = df["v_call"].apply(get_chain_type)
 
-    # V/J gene
+    # V and J gene without the allele suffix
     df["v_gene"] = df["v_call"].apply(strip_allele)
     df["j_gene"] = df["j_call"].apply(strip_allele)
 
@@ -339,11 +360,9 @@ def load_raw_data(input_file):
 
 
 def prepare_heavy_clonotyping_input(df):
-    """
-    只准备 heavy-only clonotyping 所需输入
-    """
+    """Keep the productive heavy-chain records that can be clonotyped."""
     if "junction" not in df.columns:
-        raise ValueError("输入文件缺少 junction 列，无法进行 junction-based clonotyping。")
+        raise ValueError("Input file has no 'junction' column; clonotyping is not possible.")
 
     heavy_df = df[df["chain_type"] == "Heavy"].copy()
 
@@ -370,15 +389,14 @@ def prepare_heavy_clonotyping_input(df):
 
 
 # =========================
-# 7. heavy-only clonotyping
+# 7. Heavy-chain clonotyping
 # =========================
 def run_heavy_clonotyping(df, max_distance=0.15):
-    """
-    最一般化逻辑：
-    - 同 V gene
-    - 同 J gene
-    - 同 junction nt length
-    - 组内按 junction nt 的 normalized Hamming distance 聚类
+    """Assign a clonotype ID to every heavy-chain record.
+
+    Records are grouped by V gene, J gene and junction length. Inside a group, pairs
+    whose normalised Hamming distance is at most max_distance are linked, and linked
+    records are merged transitively (single linkage).
     """
     df = df.copy().reset_index(drop=True)
 
@@ -425,10 +443,11 @@ def run_heavy_clonotyping(df, max_distance=0.15):
 
 
 # =========================
-# 8. 输出整理
+# 8. Output tables
 # =========================
 def make_output_tables(df):
-    # 先 copy 一次，去碎片化
+    """Return the per-record table, the per-clonotype summary and the clone sizes."""
+    # One copy keeps the many assignments above from fragmenting the frame
     df = df.copy()
 
     clone_counts = (
@@ -472,33 +491,33 @@ def make_output_tables(df):
 
 
 # =========================
-# 9. 主程序
+# 9. Main
 # =========================
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # 读取 productive 原始数据
+    # Load and filter the productive records
     raw_df = load_raw_data(INPUT_FILE)
     print(f"Total productive sequences: {len(raw_df)}")
     print(raw_df["chain_type"].value_counts())
 
-    # 保留原始可视化
+    # Descriptive plots, on all productive records
     plot_gene_usage(raw_df, OUTPUT_DIR)
     plot_shm(raw_df, OUTPUT_DIR)
     plot_cdr3_length(raw_df, OUTPUT_DIR)
 
-    # heavy-only clonotyping 输入
+    # Heavy-chain input for clonotyping
     heavy_df = prepare_heavy_clonotyping_input(raw_df)
 
     if len(heavy_df) == 0:
-        raise ValueError("过滤后没有可用于 heavy-only clonotyping 的记录。")
+        raise ValueError("No heavy-chain records left after filtering; nothing to clonotype.")
 
-    print("\n--- Running Heavy-Only Clonotyping ---")
+    print("\nHeavy-chain clonotyping ...")
     cloned_df = run_heavy_clonotyping(heavy_df, max_distance=MAX_DISTANCE)
 
     print(f"Total Clones Identified: {cloned_df['clone_id'].nunique()}")
 
-    # 输出表格
+    # Tables
     result_df, summary_df, clone_counts = make_output_tables(cloned_df)
 
     result_file = os.path.join(OUTPUT_DIR, "Heavy_Clonotypes.tsv")
@@ -507,7 +526,7 @@ def main():
     result_df.to_csv(result_file, sep="\t", index=False)
     summary_df.to_csv(summary_file, sep="\t", index=False)
 
-    # clone 可视化
+    # Clone composition
     plot_clone_donut(
         clone_counts=clone_counts,
         total_cells=len(cloned_df),
@@ -515,7 +534,7 @@ def main():
         top_n=TOP_N_CLONES_IN_PIE
     )
 
-    # summary
+    # Console summary
     n_seq = len(result_df)
     n_clone = result_df["clone_id"].nunique()
     largest_clone = result_df["clone_size"].max()
