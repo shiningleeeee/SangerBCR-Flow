@@ -102,6 +102,18 @@ Records that are not productive, have no V or J call, or have no usable junction
 sequence are excluded from clonotyping. The console output reports how many records
 were retained at each step.
 
+## Acknowledgements
+
+This project was initially developed with reference to
+[Siwen-Long/scBCR-Analysis](https://github.com/Siwen-Long/scBCR-Analysis) by Siwen Long,
+a Sanger-sequencing BCR analysis pipeline built on IgBLAST that also emits AIRR-C
+standard rearrangement output. Thanks to its author for making that work available and
+for the design that informed the early stages of this pipeline.
+
+## License
+
+Released under the [MIT License](LICENSE).
+
 ## Notes and limitations
 
 - **Human immunoglobulin only.** `-organism human` and the human IMGT references are
