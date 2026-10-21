@@ -126,14 +126,21 @@ If you use this pipeline, cite the tools it builds on:
   doi:[10.1093/nar/gkn838](https://doi.org/10.1093/nar/gkn838). The reference directory is
   redistributed by IMGT under its own terms of use; read them before redistributing
   `references/`.
-- **ABI trace trimming** — Mott R. Trace trimming: a method to improve the accuracy of
-  sequence data. *Nucleic Acids Res.* 1999;27:4115-4116.
+- **ABI trace trimming** — reads are trimmed with Biopython's `abi-trim` format, which
+  implements Richard Mott's modified trimming algorithm (Cock PJA et al. Biopython: freely
+  available Python tools for computational molecular biology and bioinformatics.
+  *Bioinformatics.* 2009;25:1422-1423.
+  doi:[10.1093/bioinformatics/btp163](https://doi.org/10.1093/bioinformatics/btp163)).
+  The algorithm itself is described in the phred/phrap documentation
+  ([www.phrap.org](http://www.phrap.org)).
 - **AIRR Community standards** — the annotation fields follow the AIRR Rearrangement
-  schema (Vander Heiden JA et al. *Nat Genet.* 2018;50:1274-1279,
-  doi:[10.1038/s41588-018-0206-z](https://doi.org/10.1038/s41588-018-0206-z)), and the
-  clonotype definition follows the AIRR clonotype paper (Vander Heiden JA et al.
-  *Front Immunol.* 2018;9:2206,
-  doi:[10.3389/fimmu.2018.02206](https://doi.org/10.3389/fimmu.2018.02206)).
+  schema (Vander Heiden JA et al. AIRR Community standardized representations for annotated
+  immune repertoires. *Front Immunol.* 2018;9:2206,
+  doi:[10.3389/fimmu.2018.02206](https://doi.org/10.3389/fimmu.2018.02206)), and the
+  clonotype definition — same V gene, same J gene, same junction length, single-linkage
+  clustering above a normalised Hamming distance threshold — follows Change-O (Gupta NT
+  et al. *Bioinformatics.* 2015;31:3356-3358,
+  doi:[10.1093/bioinformatics/btv359](https://doi.org/10.1093/bioinformatics/btv359)).
 
 Each run records what produced its output: `references/sources.txt` (checksums of the
 germline references), `results/step02_run_info.txt` (the exact igblastn command, the

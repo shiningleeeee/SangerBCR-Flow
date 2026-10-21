@@ -14,8 +14,10 @@ Output: ../results/analysis_output/
 Clonotypes are called on the heavy chain only: records sharing the V gene, the J gene
 and the junction length are linked when their junction nucleotide sequences differ by at
 most MAX_DISTANCE (normalised Hamming distance), and linked records are merged
-transitively (single linkage). This is the clonotype definition of the AIRR Community
-(Vander Heiden et al., Front Immunol 2018, doi:10.3389/fimmu.2018.02206).
+transitively (single linkage). This is the clonotype definition implemented by Change-O
+(Gupta et al., Bioinformatics 2015, doi:10.1093/bioinformatics/btv359) and used by the
+AIRR Community to populate clone_id (Vander Heiden et al., Front Immunol 2018,
+doi:10.3389/fimmu.2018.02206).
 
 Clonotype IDs are assigned deterministically (largest clone first, ties broken on the
 junction sequence), so the same input always yields the same IDs.
