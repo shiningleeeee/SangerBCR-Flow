@@ -114,6 +114,36 @@ for the design that informed the early stages of this pipeline.
 
 Released under the [MIT License](LICENSE).
 
+## Methods and references
+
+If you use this pipeline, cite the tools it builds on:
+
+- **IgBLAST** — Ye J, Ma N, Madden TL, Ostell JM. IgBLAST: an immunoglobulin variable
+  domain sequence analysis tool. *Nucleic Acids Res.* 2013;41:W34-W40.
+  doi:[10.1093/nar/gkt382](https://doi.org/10.1093/nar/gkt382)
+- **IMGT germline references** — Lefranc M-P et al. IMGT, the international
+  ImMunoGeneTics information system. *Nucleic Acids Res.* 2009;37:D1006-D1012.
+  doi:[10.1093/nar/gkn838](https://doi.org/10.1093/nar/gkn838). The reference directory is
+  redistributed by IMGT under its own terms of use; read them before redistributing
+  `references/`.
+- **ABI trace trimming** — Mott R. Trace trimming: a method to improve the accuracy of
+  sequence data. *Nucleic Acids Res.* 1999;27:4115-4116.
+- **AIRR Community standards** — the annotation fields follow the AIRR Rearrangement
+  schema (Vander Heiden JA et al. *Nat Genet.* 2018;50:1274-1279,
+  doi:[10.1038/s41588-018-0206-z](https://doi.org/10.1038/s41588-018-0206-z)), and the
+  clonotype definition follows the AIRR clonotype paper (Vander Heiden JA et al.
+  *Front Immunol.* 2018;9:2206,
+  doi:[10.3389/fimmu.2018.02206](https://doi.org/10.3389/fimmu.2018.02206)).
+
+Each run records what produced its output: `references/sources.txt` (checksums of the
+germline references), `results/step02_run_info.txt` (the exact igblastn command, the
+IgBLAST version and the query checksum) and `results/analysis_output/run_info.json`
+(step 3 parameters, library versions and the input checksum).
+
+Human immunoglobulin sequencing data can count as human-subject data. Check your own
+ethics approval or IRB requirements before sharing `raw_data/`; `.gitignore` keeps the
+`.ab1` files and `results/` out of version control for that reason.
+
 ## Notes and limitations
 
 - **Human immunoglobulin only.** `-organism human` and the human IMGT references are
@@ -123,8 +153,14 @@ Released under the [MIT License](LICENSE).
 - **Somatic hypermutation is a quick descriptive measure.** It is read off IgBLAST's
   `v_identity`, the percentage of identical positions in the V gene alignment
   (`mutation_rate = 100 - v_identity`). It is not a substitution-model estimate.
+- **`v_identity` stays a percentage.** AIRR defines `v_identity` as a fraction in
+  `0-1`, but IgBLAST writes `0-100` in `outfmt 19`. The TSV in `results/` is therefore
+  not strictly conformant on this one field; step 3 converts it before plotting. Tools
+  that consume the TSV as AIRR should divide this field by 100.
 - **Clone sizes are a sampling metric.** They count retained sequences (wells) sharing a
-  clonotype, not absolute B-cell frequencies.
+  clonotype, not absolute B-cell frequencies. For single-molecule amplicons most
+  clonotypes are singletons by construction, and step 3 prints a note when that is the
+  case.
 - **Rename or move `results/` between runs** so that two experiments do not mix. Step 1
   recreates `results/` on its own.
 

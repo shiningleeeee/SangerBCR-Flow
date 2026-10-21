@@ -14,11 +14,16 @@
 
 set -euo pipefail
 
-PROJECT_DIR=~/bcr
+# Resolve the project root from this script, so the pipeline can live anywhere.
+# Steps 1 and 3 address ../raw_data and ../results relative to their own directory;
+# a hardcoded ~/bcr would silently write into a different tree and leave the input
+# FASTA behind.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 IG_DIR="$PROJECT_DIR/igblast_tool"
 REF_DIR="$PROJECT_DIR/references"
 RES_DIR="$PROJECT_DIR/results"
-THREADS=4
+THREADS="${THREADS:-4}"
 
 export IGDATA="$IG_DIR"
 
@@ -33,6 +38,42 @@ download_file() {
     fi
 }
 
+# Download $url to $out and check it against the checksum published next to it.
+# A mismatch deletes the file, so the next run downloads it again instead of
+# unpacking a truncated or tampered archive.
+download_verified() {
+    local url="$1"
+    local out="$2"
+    local expected actual
+
+    download_file "$url" "$out"
+
+    if ! wget -q --tries=3 --timeout=30 -O "${out}.md5" "${url}.md5" 2>/dev/null; then
+        echo "WARNING: no checksum published for $url, NOT verified."
+        rm -f "${out}.md5"
+        return 0
+    fi
+
+    expected="$(awk 'NF {print $1; exit}' "${out}.md5" 2>/dev/null || true)"
+    rm -f "${out}.md5"
+
+    if [ -z "$expected" ]; then
+        echo "WARNING: unreadable checksum file for $url, NOT verified."
+        return 0
+    fi
+
+    actual="$(md5sum "$out" | awk '{print $1}')"
+    if [ "$expected" != "$actual" ]; then
+        echo "ERROR: checksum mismatch for $url"
+        echo "       expected $expected"
+        echo "       got      $actual"
+        rm -f "$out"
+        return 1
+    fi
+
+    echo "Checksum verified: $(basename "$out")"
+}
+
 # Build a BLAST nucleotide database next to $fasta, unless it is already there.
 build_db_if_needed() {
     local fasta="$1"
@@ -44,7 +85,7 @@ build_db_if_needed() {
 echo "[1/5] IgBLAST"
 if [ ! -x "$IG_DIR/bin/igblastn" ]; then
     cd "$IG_DIR"
-    download_file \
+    download_verified \
         "https://ftp.ncbi.nlm.nih.gov/blast/executables/igblast/release/1.22.0/ncbi-igblast-1.22.0-x64-linux.tar.gz" \
         "ncbi-igblast-1.22.0-x64-linux.tar.gz"
     tar -xzf ncbi-igblast-1.22.0-x64-linux.tar.gz --strip-components=1
@@ -92,6 +133,23 @@ else
     echo "C-region reference already present, skipping the download."
 fi
 
+# Record where the references came from. IMGT revises its V-QUEST reference directory
+# without a version number, so the checksums below (or an archived copy of this
+# directory) are what makes a later run reproducible.
+{
+    echo "# Reference sources used by 02_run_igblast.sh"
+    echo "# generated: $(date -Iseconds)"
+    echo "# IMGT reference directory: https://www.imgt.org/download/V-QUEST/IMGT_V-QUEST_reference_directory/"
+    echo "# Citation: Lefranc M-P et al., IMGT (see the IMGT terms of use)."
+    for f in "$REF_DIR/imgt_ig_v_human.fa" "$REF_DIR/imgt_ig_d_human.fa" \
+             "$REF_DIR/imgt_ig_j_human.fa" "$REF_DIR/human_C_genes.fasta"; do
+        if [ -f "$f" ]; then
+            printf "sha256:%s  %s\n" "$(sha256sum "$f" | awk '{print $1}')" "$(basename "$f")"
+        fi
+    done
+} > "$REF_DIR/sources.txt"
+echo "Reference checksums recorded in: $REF_DIR/sources.txt"
+
 echo "[3/5] BLAST databases"
 build_db_if_needed "$REF_DIR/imgt_ig_v_human.fa"
 build_db_if_needed "$REF_DIR/imgt_ig_d_human.fa"
@@ -136,6 +194,17 @@ if [ -f "$REF_DIR/human_C_genes.fasta" ]; then
 fi
 
 "${CMD[@]}"
+
+# Record what produced this output.
+{
+    echo "step: 2 (igblastn)"
+    echo "date: $(date -Iseconds)"
+    echo "project_dir: $PROJECT_DIR"
+    echo "command: ${CMD[*]}"
+    echo "igblast_version: $("$IG_DIR/bin/igblastn" -version 2>&1 | head -1)"
+    echo "query_sha256: $(sha256sum "$QUERY_FILE" | awk '{print $1}')"
+    echo "output_sha256: $(sha256sum "$OUT_FILE" | awk '{print $1}')"
+} > "$RES_DIR/step02_run_info.txt"
 
 echo "IgBLAST finished."
 echo "Output: $OUT_FILE"

@@ -8,20 +8,36 @@ Output: ../results/analysis_output/
           CDR3_Length_Distribution.png
           Clone_Pie_Chart.png
           Heavy_Clonotypes.tsv, Clone_Summary.tsv
+          stage_accounting.tsv   how many records survived each filter
+          run_info.json          parameters, library versions and the input checksum
 
 Clonotypes are called on the heavy chain only: records sharing the V gene, the J gene
 and the junction length are linked when their junction nucleotide sequences differ by at
 most MAX_DISTANCE (normalised Hamming distance), and linked records are merged
-transitively (single linkage).
+transitively (single linkage). This is the clonotype definition of the AIRR Community
+(Vander Heiden et al., Front Immunol 2018, doi:10.3389/fimmu.2018.02206).
+
+Clonotype IDs are assigned deterministically (largest clone first, ties broken on the
+junction sequence), so the same input always yields the same IDs.
 
 Run from this directory:  python3 03_analyze_clones.py
+Run with --help to see the options; the defaults below are only the fallbacks.
 """
 
 
+import argparse
+import hashlib
+import json
 import os
+import platform
 import re
+import sys
+from datetime import datetime
+
+import numpy as np
 import pandas as pd
 import seaborn as sns
+import matplotlib
 import matplotlib.pyplot as plt
 
 
@@ -48,6 +64,8 @@ TOP_N_CLONES_IN_PIE = 19
 TRUTHY = {"T", "TRUE", "1", "YES", "Y"}
 # Strings that stand for "no value" in the AIRR TSV
 FAKE_NULL = {"", "NA", "NAN", "NONE", "NULL"}
+# Gap characters that IMGT-gapped sequences may contain
+GAP_CHARS = (".", "-")
 
 
 # =========================
@@ -92,30 +110,45 @@ def strip_allele(x):
     return x.split("*")[0].strip()
 
 
+def strip_gaps(x):
+    """Remove IMGT gap characters from a nucleotide or amino acid string."""
+    for gap in GAP_CHARS:
+        x = x.replace(gap, "")
+    return x
+
+
 def normalize_cdr3_aa(x):
     """Return an uppercase CDR3 amino acid string, or None when the value is unusable.
 
-    Keeps empty fields, so that a missing CDR3 never enters the length plot as "nan".
+    Gaps are removed and values containing a stop codon are rejected, so that neither
+    inflates the length distribution. Empty fields stay empty rather than entering the
+    plot as "nan".
     """
     if pd.isna(x):
         return None
-    s = str(x).strip().upper()
+
+    s = strip_gaps(str(x).strip().upper())
+
     if s in FAKE_NULL:
         return None
-    if not re.fullmatch(r"[A-Z\*\-]+", s):
+
+    if not re.fullmatch(r"[A-Z]+", s):
         return None
+
     return s
 
 
 def normalize_junction_nt(x):
     """Return the junction nucleotide sequence in upper case, or None when unusable.
 
-    Keeps empty fields, so that a missing junction never enters clonotyping as "nan".
+    Gaps are removed first: AIRR allows an IMGT-gapped junction, and a gap would
+    otherwise fail the character check and silently drop every record. Empty fields stay
+    empty rather than entering clonotyping as "nan".
     """
     if pd.isna(x):
         return None
 
-    s = str(x).strip().upper()
+    s = strip_gaps(str(x).strip().upper())
 
     if s in FAKE_NULL:
         return None
@@ -138,6 +171,18 @@ def normalized_hamming_distance(seq1, seq2):
 
     mismatches = sum(a != b for a, b in zip(seq1, seq2))
     return mismatches / len(seq1)
+
+
+def file_sha256(path):
+    """Return the SHA-256 checksum of a file, or None when it cannot be read."""
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
 
 
 # =========================
@@ -189,7 +234,7 @@ def plot_gene_usage(df, output_dir):
             palette="viridis",
             legend=False
         )
-        plt.title("Top 20 Heavy Chain V-Gene Usage")
+        plt.title(f"Top 20 Heavy Chain V-Gene Usage (n = {len(heavy_df)} records)")
         plt.xlabel("Count")
         plt.ylabel("V Gene")
         plt.tight_layout()
@@ -216,7 +261,7 @@ def plot_gene_usage(df, output_dir):
             palette="plasma",
             legend=False
         )
-        plt.title("Top 20 Light Chain V-Gene Usage")
+        plt.title(f"Top 20 Light Chain V-Gene Usage (n = {len(light_df)} records)")
         plt.xlabel("Count")
         plt.ylabel("V Gene")
         plt.tight_layout()
@@ -228,6 +273,10 @@ def plot_shm(df, output_dir):
     """Write the somatic hypermutation histogram for both chain types."""
     print("\nSHM analysis ...")
 
+    if "v_identity" not in df.columns:
+        print("No v_identity column found; skipping the SHM plot.")
+        return
+
     plot_df = df.copy()
     plot_df["v_identity_num"] = pd.to_numeric(plot_df["v_identity"], errors="coerce")
     plot_df = plot_df.dropna(subset=["v_identity_num"]).copy()
@@ -236,12 +285,14 @@ def plot_shm(df, output_dir):
         print("No usable v_identity values; skipping the SHM plot.")
         return
 
-    # IgBLAST reports v_identity as a percentage (0-100), not as a fraction
+    # IgBLAST reports v_identity as a percentage (0-100), not as a fraction. Note that
+    # AIRR defines v_identity as a fraction, so the value is converted here and the
+    # column in the TSV is left as IgBLAST wrote it.
     plot_df["mutation_rate"] = 100 - plot_df["v_identity_num"]
 
     plt.figure(figsize=(8, 6))
     sns.histplot(data=plot_df, x="mutation_rate", hue="chain_type", kde=True, bins=30)
-    plt.title("Somatic Hypermutation (SHM) Distribution")
+    plt.title(f"Somatic Hypermutation (n = {len(plot_df)} records)")
     plt.xlabel("Mutation Rate (%) (100 - v_identity)")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "SHM_Distribution.png"), dpi=300)
@@ -252,24 +303,30 @@ def plot_cdr3_length(df, output_dir):
     """Write the CDR3 amino acid length distribution."""
     print("\nCDR3 length distribution ...")
 
-    plot_df = df.copy()
-    plot_df["cdr3_aa_clean"] = plot_df["cdr3_aa"].apply(normalize_cdr3_aa) if "cdr3_aa" in plot_df.columns else None
+    # IgBLAST writes cdr3_aa whenever the domain system is IMGT. With -domain_system
+    # imgt the junction *is* the CDR3, so junction_aa is an equivalent fallback for
+    # older IgBLAST builds that do not emit cdr3_aa.
+    column = next((c for c in ("cdr3_aa", "junction_aa") if c in df.columns), None)
 
-    if "cdr3_aa_clean" not in plot_df.columns:
-        print("No cdr3_aa column found; skipping the CDR3 length plot.")
+    if column is None:
+        print("Neither cdr3_aa nor junction_aa found; skipping the CDR3 length plot.")
         return
 
+    plot_df = df.copy()
+    plot_df["cdr3_aa_clean"] = plot_df[column].apply(normalize_cdr3_aa)
     plot_df = plot_df.dropna(subset=["cdr3_aa_clean"]).copy()
 
     if plot_df.empty:
-        print("No usable cdr3_aa values; skipping the CDR3 length plot.")
+        print(f"No usable {column} values; skipping the CDR3 length plot.")
         return
+
+    print(f"Using the {column} column.")
 
     plot_df["cdr3_length"] = plot_df["cdr3_aa_clean"].str.len()
 
     plt.figure(figsize=(8, 6))
     sns.histplot(data=plot_df, x="cdr3_length", hue="chain_type", kde=True, element="step")
-    plt.title("CDR3 Amino Acid Length Distribution")
+    plt.title(f"CDR3 Amino Acid Length Distribution (n = {len(plot_df)} records)")
     plt.xlabel("CDR3 Length (aa)")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "CDR3_Length_Distribution.png"), dpi=300)
@@ -285,10 +342,13 @@ def plot_clone_donut(clone_counts, total_cells, output_dir, top_n=19):
         return
 
     top_clones = clone_counts.head(top_n)
-    others_count = clone_counts.iloc[top_n:]["size"].sum() if len(clone_counts) > top_n else 0
+    others_count = (
+        int(clone_counts.iloc[top_n:]["clone_size"].sum())
+        if len(clone_counts) > top_n else 0
+    )
 
-    labels = [f"Clone {cid}" for cid in top_clones["clone_id"]]
-    sizes = list(top_clones["size"])
+    labels = [f"Clone {int(cid)}" for cid in top_clones["clone_id"]]
+    sizes = list(top_clones["clone_size"])
 
     if others_count > 0:
         labels.append("Others")
@@ -359,14 +419,25 @@ def load_raw_data(input_file):
     return df.reset_index(drop=True)
 
 
-def prepare_heavy_clonotyping_input(df):
+def prepare_heavy_clonotyping_input(df, drop_duplicate_sequence_id=False, accounting=None):
     """Keep the productive heavy-chain records that can be clonotyped."""
     if "junction" not in df.columns:
         raise ValueError("Input file has no 'junction' column; clonotyping is not possible.")
 
+    def record(stage, value, note=""):
+        if accounting is not None:
+            accounting.append({"stage": stage, "records": value, "note": note})
+
     heavy_df = df[df["chain_type"] == "Heavy"].copy()
+    record("productive heavy-chain records", len(heavy_df))
 
     heavy_df["junction_nt"] = heavy_df["junction"].apply(normalize_junction_nt)
+    no_v = int(heavy_df["v_gene"].eq("").sum())
+    no_j = int(heavy_df["j_gene"].eq("").sum())
+    no_junction = int(heavy_df["junction_nt"].isna().sum())
+    record("without a V gene call", no_v)
+    record("without a J gene call", no_j)
+    record("without a usable junction", no_junction)
 
     heavy_df = heavy_df[
         heavy_df["v_gene"].ne("")
@@ -376,14 +447,16 @@ def prepare_heavy_clonotyping_input(df):
 
     heavy_df["junction_length"] = heavy_df["junction_nt"].str.len()
 
-    if DROP_DUPLICATE_SEQUENCE_ID:
+    if drop_duplicate_sequence_id:
         before = len(heavy_df)
         heavy_df = heavy_df.drop_duplicates(subset=["sequence_id"]).copy()
         after = len(heavy_df)
         print(f"Dropped duplicated sequence_id: {before - after}")
+        record("duplicated sequence_id dropped", before - after)
 
     heavy_df = heavy_df.reset_index(drop=True)
 
+    record("retained for clonotyping", len(heavy_df))
     print(f"\nRetained productive heavy-chain records for clonotyping: {len(heavy_df)}")
     return heavy_df
 
@@ -397,6 +470,11 @@ def run_heavy_clonotyping(df, max_distance=0.15):
     Records are grouped by V gene, J gene and junction length. Inside a group, pairs
     whose normalised Hamming distance is at most max_distance are linked, and linked
     records are merged transitively (single linkage).
+
+    The union-find roots are then renumbered so that the IDs are a stable property of
+    the data rather than of the input order: clones are ranked by size (largest first)
+    and ties are broken on V gene, J gene and the representative junction, so that
+    re-running on the same reads always yields the same clone_id.
     """
     df = df.copy().reset_index(drop=True)
 
@@ -406,15 +484,15 @@ def run_heavy_clonotyping(df, max_distance=0.15):
         df["junction_length"].astype(str)
     )
 
-    df["clone_id"] = -1
-    clone_counter = 1
+    df["clone_root"] = -1
+    root_counter = 1
 
     for _, group in df.groupby("group_key", sort=False):
         indices = group.index.tolist()
 
         if len(indices) == 1:
-            df.at[indices[0], "clone_id"] = clone_counter
-            clone_counter += 1
+            df.at[indices[0], "clone_root"] = root_counter
+            root_counter += 1
             continue
 
         uf = UnionFind(indices)
@@ -431,13 +509,35 @@ def run_heavy_clonotyping(df, max_distance=0.15):
                 if dist <= max_distance:
                     uf.union(idx_i, idx_j)
 
-        root_to_clone = {}
+        root_to_root = {}
         for idx in indices:
             root = uf.find(idx)
-            if root not in root_to_clone:
-                root_to_clone[root] = clone_counter
-                clone_counter += 1
-            df.at[idx, "clone_id"] = root_to_clone[root]
+            if root not in root_to_root:
+                root_to_root[root] = root_counter
+                root_counter += 1
+            df.at[idx, "clone_root"] = root_to_root[root]
+
+    # Deterministic renumbering: size first, then the junction sequence itself.
+    sizes = df.groupby("clone_root").size()
+    representatives = (
+        df.sort_values(["junction_nt", "sequence_id"])
+        .groupby("clone_root")
+        .first()[["v_gene", "j_gene", "junction_nt"]]
+    )
+
+    order = sorted(
+        sizes.index,
+        key=lambda root: (
+            -int(sizes[root]),
+            representatives.at[root, "v_gene"],
+            representatives.at[root, "j_gene"],
+            representatives.at[root, "junction_nt"],
+        )
+    )
+    root_to_clone = {root: rank + 1 for rank, root in enumerate(order)}
+
+    df["clone_id"] = df["clone_root"].map(root_to_clone)
+    df = df.drop(columns=["clone_root"])
 
     return df.copy()
 
@@ -454,74 +554,199 @@ def make_output_tables(df):
         df
         .groupby("clone_id", as_index=False)
         .size()
-        .rename(columns={"size": "size"})
-        .sort_values(["size", "clone_id"], ascending=[False, True])
+        .rename(columns={"size": "clone_size"})
+        .sort_values(["clone_size", "clone_id"], ascending=[False, True])
         .reset_index(drop=True)
     )
 
-    clone_size_map = clone_counts.set_index("clone_id")["size"]
+    clone_size_map = clone_counts.set_index("clone_id")["clone_size"]
+    # clone_rank is the position in the size ranking (largest clone = 1), kept for the
+    # figure labels. It follows the order of clone_counts, so it is known before the
+    # summary table is built.
+    clone_rank_map = pd.Series(
+        range(1, len(clone_counts) + 1), index=clone_counts["clone_id"]
+    )
 
+    # Both columns are assigned at once: a frame that is extended one column at a time
+    # becomes fragmented and pandas warns about it further down.
     result_df = df.assign(
-        clone_size=df["clone_id"].map(clone_size_map)
+        clone_size=df["clone_id"].map(clone_size_map),
+        clone_rank=df["clone_id"].map(clone_rank_map),
     ).copy()
 
-    summary_df = (
+    # Representative record of each clonotype: the most frequent junction in the clone,
+    # with ties broken on sequence_id so that the choice is deterministic. The number of
+    # distinct junctions and the largest within-clone distance are reported alongside, so
+    # that a "clone" made of several distinct junctions can be told apart from one made
+    # of repeated reads of the same molecule.
+    junctions = (
         result_df
-        .sort_values(["clone_size", "clone_id"], ascending=[False, True])
+        .sort_values(["clone_id", "junction_nt", "sequence_id"])
+        .groupby(["clone_id", "junction_nt"], as_index=False)
+        .agg(n_records=("sequence_id", "size"), sequence_id=("sequence_id", "first"))
+    )
+    representatives = (
+        junctions
+        .sort_values(["clone_id", "n_records", "junction_nt"], ascending=[True, False, True])
         .groupby("clone_id", as_index=False)
-        .first()[[
-            "clone_id",
-            "clone_size",
-            "v_gene",
-            "j_gene",
-            "junction_length",
-            "junction_nt",
-            "sequence_id"
-        ]]
+        .first()[["clone_id", "junction_nt", "sequence_id"]]
         .rename(columns={
             "junction_nt": "representative_junction_nt",
             "sequence_id": "representative_sequence_id"
         })
+    )
+
+    distinct = (
+        result_df
+        .groupby("clone_id")["junction_nt"]
+        .nunique()
+        .reset_index()
+        .rename(columns={"junction_nt": "n_distinct_junctions"})
+    )
+
+    spread = []
+    for clone_id, group in result_df.groupby("clone_id"):
+        sequences = group["junction_nt"].tolist()
+        worst = 0.0
+        for i in range(len(sequences)):
+            for j in range(i + 1, len(sequences)):
+                if len(sequences[i]) == len(sequences[j]):
+                    worst = max(worst, normalized_hamming_distance(sequences[i], sequences[j]))
+        spread.append({"clone_id": clone_id, "max_within_clone_distance": round(worst, 4)})
+    spread = pd.DataFrame(spread, columns=["clone_id", "max_within_clone_distance"])
+
+    summary_df = (
+        representatives
+        .merge(clone_counts, on="clone_id", how="left")
+        .merge(distinct, on="clone_id", how="left")
+        .merge(spread, on="clone_id", how="left")
+        .merge(
+            result_df.groupby("clone_id", as_index=False)
+            .first()[["clone_id", "v_gene", "j_gene", "junction_length"]],
+            on="clone_id",
+            how="left"
+        )
+        [["clone_id", "clone_size", "n_distinct_junctions", "max_within_clone_distance",
+          "v_gene", "j_gene", "junction_length",
+          "representative_junction_nt", "representative_sequence_id"]]
         .sort_values(["clone_size", "clone_id"], ascending=[False, True])
         .reset_index(drop=True)
-        .copy()
     )
+
+    # clone_rank is the position in the size ranking, kept for display
+    summary_df.insert(1, "clone_rank", range(1, len(summary_df) + 1))
 
     return result_df, summary_df, clone_counts
 
 
 # =========================
-# 9. Main
+# 9. Provenance
 # =========================
-def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+def write_run_info(path, args, input_file, n_records, n_clones):
+    """Write the parameters, library versions and input checksum used by this run."""
+    info = {
+        "tool": "SangerBCR-Flow step 3 (03_analyze_clones.py)",
+        "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "parameters": {
+            "input": input_file,
+            "max_distance": args.max_distance,
+            "drop_duplicate_sequence_id": bool(args.drop_duplicate_sequence_id),
+            "top_n_clones_in_pie": args.top_n_clones,
+        },
+        "input_sha256": file_sha256(input_file),
+        "results": {"records_clonotyped": n_records, "clones": n_clones},
+        "environment": {
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "pandas": pd.__version__,
+            "numpy": np.__version__,
+            "seaborn": sns.__version__,
+            "matplotlib": matplotlib.__version__,
+        },
+    }
+
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(info, handle, indent=2, sort_keys=False)
+        handle.write("\n")
+
+
+def write_stage_accounting(path, accounting):
+    """Write the stage-accounting table (records surviving each filter)."""
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("stage\trecords\tnote\n")
+        for row in accounting:
+            handle.write(f"{row['stage']}\t{row['records']}\t{row['note']}\n")
+
+
+# =========================
+# 10. Command line
+# =========================
+def parse_args(argv=None):
+    """Return the command-line arguments, with the module constants as defaults."""
+    parser = argparse.ArgumentParser(
+        description="Summary plots and heavy-chain clonotype calling for SangerBCR-Flow.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--input", default=INPUT_FILE,
+                        help="AIRR rearrangement TSV produced by step 2")
+    parser.add_argument("--output-dir", default=OUTPUT_DIR,
+                        help="directory for the figures and tables")
+    parser.add_argument("--max-distance", type=float, default=MAX_DISTANCE,
+                        help="maximum normalised Hamming distance between junctions")
+    parser.add_argument("--top-n-clones", type=int, default=TOP_N_CLONES_IN_PIE,
+                        help="clones drawn individually in the pie chart")
+    parser.add_argument("--drop-duplicate-sequence-id", action="store_true",
+                        default=DROP_DUPLICATE_SEQUENCE_ID,
+                        help="drop records that share a sequence_id before clonotyping")
+    return parser.parse_args(argv)
+
+
+# =========================
+# 11. Main
+# =========================
+def main(argv=None):
+    args = parse_args(argv)
+    output_dir = args.output_dir
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    accounting = []
 
     # Load and filter the productive records
-    raw_df = load_raw_data(INPUT_FILE)
+    raw_df = load_raw_data(args.input)
     print(f"Total productive sequences: {len(raw_df)}")
     print(raw_df["chain_type"].value_counts())
+    accounting.append({"stage": "input records", "records": len(raw_df), "note": "productive only"})
+    accounting.append({"stage": "  of which heavy chain",
+                       "records": int((raw_df["chain_type"] == "Heavy").sum()), "note": ""})
+    accounting.append({"stage": "  of which light chain",
+                       "records": int((raw_df["chain_type"] == "Light").sum()), "note": ""})
 
     # Descriptive plots, on all productive records
-    plot_gene_usage(raw_df, OUTPUT_DIR)
-    plot_shm(raw_df, OUTPUT_DIR)
-    plot_cdr3_length(raw_df, OUTPUT_DIR)
+    plot_gene_usage(raw_df, output_dir)
+    plot_shm(raw_df, output_dir)
+    plot_cdr3_length(raw_df, output_dir)
 
     # Heavy-chain input for clonotyping
-    heavy_df = prepare_heavy_clonotyping_input(raw_df)
+    heavy_df = prepare_heavy_clonotyping_input(
+        raw_df,
+        drop_duplicate_sequence_id=args.drop_duplicate_sequence_id,
+        accounting=accounting,
+    )
 
     if len(heavy_df) == 0:
         raise ValueError("No heavy-chain records left after filtering; nothing to clonotype.")
 
     print("\nHeavy-chain clonotyping ...")
-    cloned_df = run_heavy_clonotyping(heavy_df, max_distance=MAX_DISTANCE)
+    cloned_df = run_heavy_clonotyping(heavy_df, max_distance=args.max_distance)
 
     print(f"Total Clones Identified: {cloned_df['clone_id'].nunique()}")
 
     # Tables
     result_df, summary_df, clone_counts = make_output_tables(cloned_df)
 
-    result_file = os.path.join(OUTPUT_DIR, "Heavy_Clonotypes.tsv")
-    summary_file = os.path.join(OUTPUT_DIR, "Clone_Summary.tsv")
+    result_file = os.path.join(output_dir, "Heavy_Clonotypes.tsv")
+    summary_file = os.path.join(output_dir, "Clone_Summary.tsv")
 
     result_df.to_csv(result_file, sep="\t", index=False)
     summary_df.to_csv(summary_file, sep="\t", index=False)
@@ -530,23 +755,39 @@ def main():
     plot_clone_donut(
         clone_counts=clone_counts,
         total_cells=len(cloned_df),
-        output_dir=OUTPUT_DIR,
-        top_n=TOP_N_CLONES_IN_PIE
+        output_dir=output_dir,
+        top_n=args.top_n_clones
     )
+
+    # Provenance files
+    write_run_info(
+        os.path.join(output_dir, "run_info.json"),
+        args=args,
+        input_file=args.input,
+        n_records=len(cloned_df),
+        n_clones=int(cloned_df["clone_id"].nunique()),
+    )
+    write_stage_accounting(os.path.join(output_dir, "stage_accounting.tsv"), accounting)
 
     # Console summary
     n_seq = len(result_df)
     n_clone = result_df["clone_id"].nunique()
     largest_clone = result_df["clone_size"].max()
+    n_singleton = int((summary_df["clone_size"] == 1).sum())
 
     print("\n===== Summary =====")
     print(f"Sequences retained for clonotyping : {n_seq}")
     print(f"Clones identified                  : {n_clone}")
+    print(f"  of which singletons              : {n_singleton}")
     print(f"Largest clone size                 : {largest_clone}")
+    if n_singleton / max(n_clone, 1) > 0.9:
+        print("NOTE: more than 90% of the clonotypes are singletons. That is expected for")
+        print("      independent single-molecule amplicons, and it means the clone-size")
+        print("      figures describe sampling, not clonal expansion.")
     print(f"Result file                        : {result_file}")
     print(f"Summary file                       : {summary_file}")
     print("Done.")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
